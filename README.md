@@ -8,9 +8,10 @@ Nothing to install. It runs in your browser.
 
 ## How to use it
 
-1. **Collect the exports.** Everyone in the group downloads their Letterboxd data:
-   on letterboxd.com, go to **Settings → Data → Export your data**. That gives a
-   `.zip` file. Each person sends you theirs.
+1. **Collect the exports.** Everyone in the group downloads their Letterboxd data.
+   Sign in on **letterboxd.com in a browser** (the phone app can't export), open
+   <https://letterboxd.com/settings/data/> and click **Export your data**. A `.zip`
+   downloads. Each person sends you theirs, unopened.
 2. **Put all the zips in one folder** on your computer.
 3. **Open the site** and follow the three steps on the page: paste a TMDb API key,
    pick the folder, press **Blend**.
@@ -51,6 +52,8 @@ The key is saved in your browser only.
   films up.
 - Your browser stores the API key and a cache of TMDb film data (for at most 150
   days) on your own device. Clearing the site's data in your browser removes both.
+- An export zip also contains that person's email address, so share zips only with
+  people you trust. blendboxd itself only reads the username.
 
 ## Browsers
 

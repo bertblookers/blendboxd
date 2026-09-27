@@ -31,9 +31,14 @@
 
   <div class="step" id="step-files">
     <h2><span class="num">2</span>Letterboxd exports</h2>
-    <p class="help">One export per person. Everyone downloads theirs on letterboxd.com under
-      <b>Settings &rarr; Data &rarr; Export your data</b> and sends you the .zip.
-      Put all the zips in one folder, then pick that folder.</p>
+    <p class="help">One export per person. To get theirs, everyone:</p>
+    <ol class="howto">
+      <li>Signs in on <b>letterboxd.com in a browser</b> (the phone app can't export).</li>
+      <li>Opens <a href="https://letterboxd.com/settings/data/" target="_blank" rel="noopener">letterboxd.com/settings/data</a>
+        and clicks <b>Export your data</b>. A .zip downloads.</li>
+      <li>Sends you that .zip, unopened.</li>
+    </ol>
+    <p class="help">Put all the zips in one folder, then pick that folder. (Your own export counts too.)</p>
     <div class="drop" id="drop">
       <button type="button" class="btn primary" id="pickfolder">Choose folder</button>
       <button type="button" class="btn" id="pickzips">Choose .zip files</button>
@@ -52,7 +57,9 @@
   </div>
 
   <p class="privacy">Your exports stay on this device: they are read here, in your browser, and never
-    uploaded. Only film titles and years go to TMDb, to look the films up.</p>
+    uploaded. Only film titles and years go to TMDb, to look the films up.
+    Worth knowing when you pass zips around: an export also holds that person's email address.
+    blendboxd only reads their username.</p>
 </section>
 
 <section class="progress" id="progress" hidden>
