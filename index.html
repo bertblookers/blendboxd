@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blendboxd</title>
+<meta name="description" content="Film picks a whole group will enjoy, blended from everyone's Letterboxd export.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="viewer.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<section class="setup" id="setup">
+  <div class="brand">blend<span>boxd</span></div>
+  <p class="tagline">Film picks your whole group will enjoy, blended from everyone's Letterboxd export.</p>
+
+  <div class="step" id="step-key">
+    <h2><span class="num">1</span>TMDb API key</h2>
+    <p class="help">blendboxd looks films up on TMDb, which needs a free API key. Ask whoever sent you
+      this page for theirs, or get your own: make a free account on
+      <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org</a>, then
+      <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Settings &rarr; API</a>
+      and copy the <b>API Key</b> (32 characters).</p>
+    <form class="row" id="keyform" autocomplete="off">
+      <input id="key" type="password" placeholder="Paste the API key" spellcheck="false" aria-label="TMDb API key">
+      <button type="submit" class="btn primary" id="savekey">Save key</button>
+    </form>
+    <p class="note" id="keystatus" aria-live="polite"></p>
+  </div>
+
+  <div class="step" id="step-files">
+    <h2><span class="num">2</span>Letterboxd exports</h2>
+    <p class="help">One export per person. Everyone downloads theirs on letterboxd.com under
+      <b>Settings &rarr; Data &rarr; Export your data</b> and sends you the .zip.
+      Put all the zips in one folder, then pick that folder.</p>
+    <div class="drop" id="drop">
+      <button type="button" class="btn primary" id="pickfolder">Choose folder</button>
+      <button type="button" class="btn" id="pickzips">Choose .zip files</button>
+      <button type="button" class="btn" id="reopen" hidden></button>
+      <span class="drophint">or drop the zips here</span>
+    </div>
+    <input type="file" id="folderinput" webkitdirectory multiple hidden>
+    <input type="file" id="zipinput" accept=".zip,application/zip" multiple hidden>
+    <ul class="memberlist" id="memberlist"></ul>
+    <ul class="skiplist" id="skiplist"></ul>
+  </div>
+
+  <div class="step go">
+    <button type="button" class="btn primary big" id="blend" disabled>Blend</button>
+    <p class="note" id="blendhint"></p>
+  </div>
+
+  <p class="privacy">Your exports stay on this device: they are read here, in your browser, and never
+    uploaded. Only film titles and years go to TMDb, to look the films up.</p>
+</section>
+
+<section class="progress" id="progress" hidden>
+  <div class="brand small">blend<span>boxd</span></div>
+  <h2 id="ptitle">Blending…</h2>
+  <div class="pbar"><div class="pfill" id="pfill"></div></div>
+  <p class="pphase" id="pphase" aria-live="polite"></p>
+  <p class="help">The first blend takes a few minutes: every film gets looked up on TMDb once.
+    The results are cached in this browser, so later blends take seconds.</p>
+  <button type="button" class="btn" id="cancel">Cancel</button>
+</section>
+
+<div class="appbar" id="appbar" hidden>
+  <details class="unres" id="unres" hidden><summary id="unressum"></summary><ul id="unreslist"></ul></details>
+  <span class="appnote" id="appnote"></span>
+  <button type="button" class="linkish" id="newblend">New blend</button>
+</div>
+
+<div id="viewer" hidden>
+<header>
+  <nav class="tabs" id="tabs">
+    <button type="button" class="tab tab-blend on" data-tab="blend">blend<span class="hl">boxd</span></button>
+    
+  </nav>
+  <div class="sub" id="sub"></div>
+  <div class="status" id="status" hidden><span class="dot"></span><span id="statustext"></span></div>
+</header>
+
+<div class="toolbar">
+  <input id="q" type="search" placeholder="Search title / director…" autocomplete="off">
+  <label>Sort
+    <select id="sort">
+      <option value="combined">Combined score</option>
+      <!-- per-profile score options injected here -->
+      <option value="tmdb_rating">TMDb rating</option>
+      <option value="year">Year</option>
+      <option value="runtime">Runtime</option>
+      <option value="title">Title</option>
+    </select>
+  </label>
+  <button class="linkish" id="dir" title="Toggle sort direction">▼ desc</button>
+  <label>Runtime
+    <input id="rmin" type="number" min="0" placeholder="min"> –
+    <input id="rmax" type="number" min="0" placeholder="max">
+  </label>
+  <label>Year
+    <input id="ymin" type="number" min="0" placeholder="min"> –
+    <input id="ymax" type="number" min="0" placeholder="max">
+  </label>
+  <label>Min TMDb <input id="minr" type="number" min="0" max="10" step="0.1" placeholder="0"></label>
+  <label>Watched
+    <span class="seg" id="wmode" title="Hide: only unwatched recs · Dim: show watched dimmed · Only: just films you've seen">
+      <button type="button" class="sg on" data-w="hide">Hide</button><button type="button" class="sg" data-w="dim">Dim</button><button type="button" class="sg" data-w="only">Only</button>
+    </span>
+  </label>
+  <button class="linkish" id="reset">Reset</button>
+  <span class="count" id="count"></span>
+</div>
+
+<div class="memberbar" id="memberbar" hidden>
+  <span class="mb-label" title="Toggle who is in the blend — the ranking re-blends instantly">Members</span>
+  <div class="chips" id="members"></div>
+</div>
+
+<div class="cinemabar" id="cinemabar" hidden>
+  <span class="mb-label" title="Show films playing at these cinemas — each film is tagged with where it's on">Cinemas</span>
+  <div class="chips" id="cinemas"></div>
+</div>
+<div class="cinenotice" id="cinenotice" hidden></div>
+
+<details class="vibe" open>
+  <summary>&#127898; Vibe &mdash; re-rank by mood<span class="vibe-state" id="vibeState"></span></summary>
+  <div class="presets" id="presets">
+    <button type="button" class="preset" data-preset="wiped">&#128564; Wiped</button>
+    <button type="button" class="preset" data-preset="easy">&#127871; Easy fun</button>
+    <button type="button" class="preset" data-preset="slow">&#127769; Slow &amp; immersive</button>
+    <button type="button" class="preset" data-preset="challenge">&#9889; Up for a challenge</button>
+  </div>
+  <div class="sliders">
+    <div class="vslider">
+      <label>Length <output id="v_len_v">0.00</output></label>
+      <input type="range" id="v_len" min="-1" max="1" step="0.05" value="0">
+      <div class="vhint"><span>want shorter</span><span>want longer</span></div>
+    </div>
+    <div class="vslider">
+      <label>Complexity <output id="v_cx_v">0.00</output></label>
+      <input type="range" id="v_cx" min="-1" max="1" step="0.05" value="0">
+      <div class="vhint"><span>want simpler</span><span>want denser</span></div>
+    </div>
+    <div class="vslider">
+      <label>Energy <output id="v_en_v">0.00</output></label>
+      <input type="range" id="v_en" min="-1" max="1" step="0.05" value="0">
+      <div class="vhint"><span>want calmer</span><span>want intense</span></div>
+    </div>
+    <div class="vslider beta">
+      <label>Intensity &beta; <output id="v_beta_v">0.50</output></label>
+      <input type="range" id="v_beta" min="0" max="0.95" step="0.05" value="0.5">
+      <div class="vhint"><span>gentle nudge</span><span>strong steer</span></div>
+    </div>
+  </div>
+</details>
+
+<details class="filters" open>
+  <summary>Filter by genre, country &amp; decade</summary>
+  <div class="chip-group-label">Genres
+    <span class="gmode" id="gmode" title="OR: any selected genre · AND: all selected genres">
+      <button type="button" class="gm on" data-mode="or">OR</button><button type="button" class="gm" data-mode="and">AND</button>
+    </span>
+  </div>
+  <div class="chips" id="genres"></div>
+  <div class="chip-group-label">Countries</div>
+  <div class="chips" id="countries"></div>
+  <div class="chip-group-label">Decades</div>
+  <div class="chips" id="decades"></div>
+</details>
+
+<main><div class="grid" id="grid"></div><div class="empty" id="empty" hidden>No films match these filters.</div></main>
+
+<footer class="attrib">
+  <a href="https://www.themoviedb.org/" target="_blank" rel="noopener"><img src="assets/tmdb-logo.svg" alt="TMDB" class="tmdblogo"></a>
+  <span>This application uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+    Film data and posters come from TMDB. blendboxd is not affiliated with Letterboxd.</span>
+</footer>
+
+</div>
+
+<footer class="attrib setup-foot" id="setupfoot">
+  <a href="https://www.themoviedb.org/" target="_blank" rel="noopener"><img src="assets/tmdb-logo.svg" alt="TMDB" class="tmdblogo"></a>
+  <span>This application uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+    blendboxd is not affiliated with Letterboxd.
+    <a href="https://github.com/bertblookers/blendboxd" target="_blank" rel="noopener">Source code</a> (AGPL-3.0).</span>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
