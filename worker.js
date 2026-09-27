@@ -2,7 +2,9 @@
 // TMDb key; this worker parses the exports, runs the pipeline, then keeps widening
 // the search pass after pass (like the Python app's --serve), posting each pass's
 // ranked films back to the page.
-import { dedupeLabels, liked, parseAccount, profileLabel, rated, sourceFromZip, tasteFilms } from './engine/letterboxd.js';
+import {
+  dedupeLabels, liked, onePerPerson, parseAccount, profileLabel, rated, sourceFromZip, tasteFilms,
+} from './engine/letterboxd.js';
 import { TMDbAuthError, TMDbClient, networkFetcher } from './engine/tmdb.js';
 import { openTmdbCache } from './engine/cache.js';
 import { defaultConfig, prepare } from './engine/pipeline.js';
@@ -16,19 +18,22 @@ const cache = () => (cachePromise ||= openTmdbCache());
 const post = msg => self.postMessage(msg);
 
 // A source is {name, kind: 'zip', file} or {name, kind: 'folder', files: [{path, file}]}.
+// A folder's paths are relative to the export's own root, so they're read exactly
+// (like Python reads an export folder); zips tolerate one enclosing folder.
 async function loadSource(src) {
   if (src.kind === 'zip') {
     return sourceFromZip(src.name, new Uint8Array(await src.file.arrayBuffer()));
   }
   const files = new Map();
   for (const { path, file } of src.files) files.set(path, new Uint8Array(await file.arrayBuffer()));
-  return { name: src.name, files };
+  return { name: src.name, files, exact: true };
 }
 
-const hasExportFiles = source => [...source.files.keys()]
-  .some(p => /(^|\/)(watched|ratings)\.csv$/.test(p));
+const hasExportFiles = source => (source.exact
+  ? source.files.has('watched.csv') || source.files.has('ratings.csv')
+  : [...source.files.keys()].some(p => /(^|\/)(watched|ratings)\.csv$/.test(p)));
 
-async function inspect(sources) {
+async function inspect(sources, inspectId) {
   const loaded = [];
   const skipped = [];
   for (const src of sources) {
@@ -38,23 +43,26 @@ async function inspect(sources) {
         skipped.push({ name: src.name, reason: "doesn't look like a Letterboxd export (no watched.csv or ratings.csv)" });
         continue;
       }
-      loaded.push(source);
+      loaded.push({ source, account: parseAccount(source, '') });
     } catch {
       skipped.push({ name: src.name, reason: "couldn't be read (is it a valid .zip?)" });
     }
   }
-  const labels = dedupeLabels(loaded.map(profileLabel));
+  const { kept, duplicates } = onePerPerson(loaded);
+  skipped.push(...duplicates);
+  const labels = dedupeLabels(kept.map(e => profileLabel(e.source)));
   members = [];
-  loaded.forEach((source, i) => {
-    const account = parseAccount(source, labels[i]);
-    if (!tasteFilms(account).length) {
-      skipped.push({ name: source.name, reason: `${labels[i]} has no rated or liked films yet` });
+  kept.forEach((e, i) => {
+    e.account.name = labels[i];
+    if (!tasteFilms(e.account).length) {
+      skipped.push({ name: e.source.name, reason: `${labels[i]} has no rated or liked films yet` });
       return;
     }
-    members.push({ id: i, label: labels[i], account, fileName: source.name });
+    members.push({ id: i, label: labels[i], account: e.account, fileName: e.source.name });
   });
   post({
     type: 'members',
+    inspectId,
     members: members.map(m => ({
       id: m.id, label: m.label, fileName: m.fileName,
       films: m.account.films.size, rated: rated(m.account).length, liked: liked(m.account).length,
@@ -67,6 +75,10 @@ async function blend({ apiKey, include }) {
   const myRun = ++runId;
   const shouldStop = () => myRun !== runId;
   const chosen = members.filter(m => include.includes(m.id));
+  if (!chosen.length) {
+    post({ type: 'error', auth: false, message: 'Nobody to blend: pick the exports again.' });
+    return;
+  }
   const tmdbCache = await cache();
   const fetchRaw = networkFetcher(apiKey);
   const client = new TMDbClient({ fetchRaw, cache: tmdbCache });
@@ -104,7 +116,7 @@ async function blend({ apiKey, include }) {
 
 self.onmessage = e => {
   const msg = e.data;
-  if (msg.type === 'inspect') inspect(msg.sources);
+  if (msg.type === 'inspect') inspect(msg.sources, msg.inspectId);
   else if (msg.type === 'blend') blend(msg);
   else if (msg.type === 'stop') runId++;
 };

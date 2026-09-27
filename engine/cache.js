@@ -52,6 +52,26 @@ export async function kvSet(key, value) {
   }
 }
 
+// Delete entries past the age limit (run on page load, so data expires even in a
+// browser that never blends again).
+export async function purgeExpired({ now = Date.now(), maxAgeDays = MAX_AGE_DAYS } = {}) {
+  const db = await openDb();
+  try {
+    const tx = db.transaction('tmdb', 'readwrite');
+    const cutoff = now - maxAgeDays * DAY_MS;
+    const req = tx.objectStore('tmdb').openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      if (!cursor.value || !(cursor.value.t >= cutoff)) cursor.delete();
+      cursor.continue();
+    };
+    await done(tx);
+  } finally {
+    db.close();
+  }
+}
+
 // -> {get(key), set(key, value), flush(), size, persistent}
 export async function openTmdbCache({ now = Date.now(), maxAgeDays = MAX_AGE_DAYS } = {}) {
   const mem = new Map();

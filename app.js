@@ -2,7 +2,8 @@
 // each pass's ranked films to the viewer (shared with the Python app, generated
 // into viewer.js by tools/build_web.py). The engine runs in worker.js.
 import { startViewer } from './viewer.js';
-import { kvGet, kvSet } from './engine/cache.js';
+import { kvGet, kvSet, purgeExpired } from './engine/cache.js';
+import { groupSources } from './sources.js';
 
 const $ = id => document.getElementById(id);
 const KEY_STORE = 'blendboxd.tmdbKey';
@@ -66,26 +67,6 @@ $('keyform').onsubmit = async e => {
 };
 
 // ---------------------------------------------------------- picking exports
-// Files arrive as [{path, file}] with '/'-separated paths relative to what was
-// picked. Every .zip is one export; a folder holding watched.csv or ratings.csv is
-// an unzipped export.
-function groupSources(files, rootName = 'folder') {
-  const sources = files.filter(f => /\.zip$/i.test(f.path))
-    .map(f => ({ name: f.path, kind: 'zip', file: f.file }));
-  const dirs = new Set();
-  for (const f of files) {
-    const m = f.path.match(/^(?:(.*)\/)?(watched|ratings)\.csv$/);
-    if (m) dirs.add(m[1] || '');
-  }
-  for (const dir of dirs) {
-    const prefix = dir ? `${dir}/` : '';
-    const inside = files.filter(f => f.path.startsWith(prefix) && /\.csv$/i.test(f.path))
-      .map(f => ({ path: f.path.slice(prefix.length), file: f.file }));
-    sources.push({ name: dir || rootName, kind: 'folder', files: inside });
-  }
-  return sources.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name));
-}
-
 async function readDirHandle(dir, prefix = '', depth = 0) {
   const out = [];
   for await (const [name, h] of dir.entries()) {
@@ -116,19 +97,36 @@ async function walkEntry(entry, prefix, out, depth) {
 let sources = [];
 let members = [];
 const excluded = new Set();
+// Each read of the exports gets an id; Blend stays off until the matching member
+// list is back, so it can never blend a stale or half-read selection.
+let inspectId = 0;
+let inspecting = false;
+const MAX_ZIP_BYTES = 50 * 1024 * 1024; // real exports are a few MB
+
+function inspectSources() {
+  inspecting = true;
+  worker.postMessage({ type: 'inspect', sources, inspectId: ++inspectId });
+  updateBlendButton();
+}
 
 function useFiles(files, rootName) {
-  sources = groupSources(files, rootName);
+  const tooBig = files.filter(f => /\.zip$/i.test(f.path) && f.file.size > MAX_ZIP_BYTES);
+  sources = groupSources(files.filter(f => !tooBig.includes(f)), rootName);
   excluded.clear();
+  members = [];
+  const bigSkips = tooBig.map(f => ({ name: f.path, reason: 'too large to be a Letterboxd export' }));
   if (!sources.length) {
-    members = [];
-    renderMembers([], [{ name: rootName, reason: 'no .zip exports or export folders found there' }]);
+    inspectId++; // drop any read still in flight
+    inspecting = false;
+    renderMembers([], [...bigSkips, { name: rootName, reason: 'no .zip exports or export folders found there' }]);
     return;
   }
   $('memberlist').innerHTML = '<li class="counts">Reading exports…</li>';
   $('skiplist').innerHTML = '';
-  worker.postMessage({ type: 'inspect', sources });
+  extraSkips = bigSkips;
+  inspectSources();
 }
+let extraSkips = [];
 
 $('pickfolder').onclick = async () => {
   if (!window.showDirectoryPicker) { $('folderinput').click(); return; }
@@ -215,10 +213,11 @@ const included = () => members.filter(m => !excluded.has(m.id));
 function updateBlendButton() {
   const n = included().length;
   const btn = $('blend');
-  btn.disabled = !(apiKey && n);
+  btn.disabled = !(apiKey && n) || inspecting;
   btn.textContent = n > 1 ? `Blend ${n} people` : n === 1 ? `Picks for ${included()[0].label}` : 'Blend';
   $('blendhint').textContent = !apiKey ? 'Save a TMDb key first (step 1).'
-    : !members.length ? 'Pick the exports first (step 2).' : '';
+    : inspecting ? 'Reading the exports…'
+      : !members.length ? 'Pick the exports first (step 2).' : '';
 }
 
 // ---------------------------------------------------------------- the engine
@@ -226,7 +225,23 @@ let worker = null;
 function startWorker() {
   worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   worker.onmessage = e => handlers[e.data.type]?.(e.data);
-  worker.onerror = e => showFailure(`The engine crashed: ${e.message || 'unknown error'}`);
+  worker.onerror = e => {
+    e.preventDefault();
+    const why = e.message || 'unknown error';
+    if (!$('setup').hidden) {
+      // Crashed while reading the exports (or failed to load): say so, and start a
+      // fresh engine so the next pick works.
+      inspecting = false;
+      members = [];
+      $('memberlist').innerHTML = '';
+      $('skiplist').innerHTML = `<li>Couldn't read the exports (${esc(why)}). Try fewer or smaller files, or a current browser.</li>`;
+      worker.terminate();
+      startWorker();
+      updateBlendButton();
+      return;
+    }
+    showFailure(`The engine crashed: ${why}`);
+  };
 }
 
 const PHASES = {
@@ -273,7 +288,11 @@ function showNotes(msg) {
 
 let viewing = false;
 const handlers = {
-  members: msg => renderMembers(msg.members, msg.skipped),
+  members: msg => {
+    if (msg.inspectId !== inspectId) return; // an older read, superseded
+    inspecting = false;
+    renderMembers(msg.members, [...extraSkips, ...msg.skipped]);
+  },
   progress: msg => {
     const first = pending == null;
     pending = msg;
@@ -309,6 +328,17 @@ const handlers = {
     });
   },
   error: msg => {
+    if (viewing) {
+      // The results stay usable; deepening just ends. The status line shows the
+      // search as finished, and the note says why it stopped early.
+      live.done = true;
+      live.generation += 1;
+      if (msg.auth) { apiKey = ''; store.clear(); }
+      $('appnote').textContent = msg.auth
+        ? 'TMDb rejected the key, so the search stopped early. Use “New blend” to enter a valid key.'
+        : `The search stopped early: ${msg.message}`;
+      return;
+    }
     if (msg.auth) {
       apiKey = '';
       store.clear();
@@ -322,7 +352,12 @@ const handlers = {
 };
 
 function showFailure(message) {
-  if (viewing) { $('appnote').textContent = `Deepening stopped: ${message}`; return; }
+  if (viewing) {
+    live.done = true;
+    live.generation += 1;
+    $('appnote').textContent = `The search stopped early: ${message}`;
+    return;
+  }
   $('ptitle').textContent = 'The blend stopped';
   $('pphase').textContent = message;
   $('cancel').textContent = 'Back';
@@ -333,14 +368,14 @@ function backToSetup() {
   // the same exports into it.
   worker.terminate();
   startWorker();
-  if (sources.length) worker.postMessage({ type: 'inspect', sources });
+  if (sources.length) inspectSources();
   $('progress').hidden = true;
   $('setup').hidden = false;
 }
 
 $('blend').onclick = () => {
   const chosen = included();
-  if (!apiKey || !chosen.length) return;
+  if (!apiKey || !chosen.length || inspecting) return;
   $('setup').hidden = true;
   $('progress').hidden = false;
   $('ptitle').textContent = chosen.length > 1 ? `Blending ${chosen.length} people…` : `Finding picks for ${chosen[0].label}…`;
@@ -354,3 +389,5 @@ $('newblend').onclick = () => location.reload();
 
 startWorker();
 showKey();
+// Drop TMDb data older than the cache limit even if this browser never blends again.
+setTimeout(() => purgeExpired().catch(() => {}), 3000);

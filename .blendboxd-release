@@ -18,6 +18,7 @@ engine/resolve.js
 engine/score.js
 engine/tmdb.js
 index.html
+sources.js
 vendor/fflate.js
 viewer.css
 viewer.js

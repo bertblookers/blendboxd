@@ -77,11 +77,18 @@ const compactGenres = raw => ({
 // ------------------------------------------------------------------ network
 // fetchRaw(path, params) for the real API: returns the parsed JSON, or a
 // {__status_code__} sentinel like the Python client (404 is a definitive answer;
-// 599 means retries ran out). 401 throws: every later request would fail too.
-export function networkFetcher(apiKey, { maxConcurrent = 8, minInterval = 30, maxRetries = 4, timeoutMs = 20000 } = {}) {
+// 599 means retries ran out). 401 throws: every later request would fail too. So
+// does a run of requests that all exhausted their retries (TMDb unreachable): the
+// blend stops with a clear message instead of grinding through every film.
+export class TMDbUnreachableError extends Error {}
+
+export function networkFetcher(apiKey, {
+  maxConcurrent = 8, minInterval = 30, maxRetries = 4, timeoutMs = 20000, giveUpAfter = 8, backoffMs = 1000,
+} = {}) {
   let active = 0;
   const waiters = [];
   let nextStart = 0;
+  let failedInARow = 0;
   const acquire = async () => {
     while (active >= maxConcurrent) await new Promise(r => waiters.push(r));
     active++;
@@ -92,6 +99,21 @@ export function networkFetcher(apiKey, { maxConcurrent = 8, minInterval = 30, ma
   };
   const release = () => { active--; const w = waiters.shift(); if (w) w(); };
 
+  // One attempt, body included: the timeout and the retry cover a connection that
+  // drops or stalls mid-download, not just until the headers arrive.
+  const attemptOnce = async url => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, { signal: ctrl.signal });
+      const body = resp.status === 200 ? await resp.json()
+        : (resp.status >= 400 && resp.status !== 429 && resp.status < 500) ? await resp.text() : null;
+      return { status: resp.status, body, retryAfter: resp.headers.get('Retry-After') };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   const fetchRaw = async (path, params) => {
     const url = new URL(`${BASE}/${path.replace(/^\/+/, '')}`);
     url.searchParams.set('api_key', apiKey);
@@ -99,35 +121,32 @@ export function networkFetcher(apiKey, { maxConcurrent = 8, minInterval = 30, ma
     let lastErr = null;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       await acquire();
-      let resp;
+      let res = null;
       try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-        try {
-          resp = await fetch(url, { signal: ctrl.signal });
-        } finally {
-          clearTimeout(timer);
-        }
+        res = await attemptOnce(url);
       } catch (err) {
         lastErr = err;
+      } finally {
         release();
-        await sleep(Math.min(2 ** attempt, 8) * 1000);
-        continue;
       }
-      release();
+      if (!res) { await sleep(Math.min(2 ** attempt, 8) * backoffMs); continue; }
       fetchRaw.requests++;
-      if (resp.status === 200) return resp.json();
-      if (resp.status === 404) return { __status_code__: 404 };
-      if (resp.status === 401) throw new TMDbAuthError('TMDb rejected the API key (401).');
-      if (resp.status === 429) {
-        const ra = Number.parseFloat(resp.headers.get('Retry-After') || '1');
+      if (res.status === 401) throw new TMDbAuthError('TMDb rejected the API key (401).');
+      if (res.status === 429) {
+        const ra = Number.parseFloat(res.retryAfter || '1');
         await sleep(((Number.isFinite(ra) ? ra : 1) + 0.5) * 1000);
         continue;
       }
-      if (resp.status >= 500) { await sleep(Math.min(2 ** attempt, 8) * 1000); continue; }
-      return { __status_code__: resp.status, __error__: (await resp.text()).slice(0, 200) };
+      if (res.status >= 500) { await sleep(Math.min(2 ** attempt, 8) * backoffMs); continue; }
+      failedInARow = 0;
+      if (res.status === 200) return res.body;
+      if (res.status === 404) return { __status_code__: 404 };
+      return { __status_code__: res.status, __error__: String(res.body).slice(0, 200) };
     }
     fetchRaw.networkErrors++;
+    if (++failedInARow >= giveUpAfter) {
+      throw new TMDbUnreachableError("Can't reach TMDb. Check your internet connection, then blend again.");
+    }
     const detail = lastErr ? `network error: ${lastErr}` : 'max retries exceeded';
     return { __status_code__: 599, __error__: detail };
   };

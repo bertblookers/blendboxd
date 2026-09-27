@@ -1,7 +1,8 @@
 // Parse Letterboxd data exports into accounts. Port of blendboxd/letterboxd.py plus
 // the CLI's labelling (profile.csv username, deduped). An export "source" is
-// {name, files}: `files` maps a path inside the export ("ratings.csv",
+// {name, files, exact?}: `files` maps a path inside the export ("ratings.csv",
 // "likes/films.csv", …) to its bytes, from an unzipped .zip or a picked folder.
+// `exact` (a folder) means paths are read as-is; a zip's may sit one folder deep.
 import { unzipSync } from '../vendor/fflate.js';
 import { readDicts } from './csv.js';
 
@@ -21,7 +22,7 @@ const decoder = new TextDecoder('utf-8'); // strips a UTF-8 BOM, like utf-8-sig
 function readCsv(source, want) {
   let match = null;
   if (source.files.has(want)) match = want;
-  else {
+  else if (!source.exact) {
     // Tolerate exports nested under a top-level folder.
     for (const path of source.files.keys()) {
       if (path === want || path.endsWith('/' + want)) { match = path; break; }
@@ -112,6 +113,27 @@ export function profileLabel(source) {
   const m = stem.match(/^letterboxd-(.+?)-\d{4}-\d{2}-\d{2}/);
   if (m) return m[1];
   return stem || 'profile';
+}
+
+// One export per person. The same username twice (a zip next to its unzipped
+// folder, or exports from two different days) would count that person twice in
+// the blend, so keep the export with the most films. `entries` are
+// [{source, account}]; returns {kept, duplicates: [{name, reason}]}.
+export function onePerPerson(entries) {
+  const userOf = new Map(entries.map(e => [e, exportUsername(e.source).toLowerCase()]));
+  const best = new Map();
+  for (const e of entries) {
+    const user = userOf.get(e);
+    if (!user) continue;
+    const cur = best.get(user);
+    if (!cur || e.account.films.size > cur.account.films.size) best.set(user, e);
+  }
+  const kept = entries.filter(e => !userOf.get(e) || best.get(userOf.get(e)) === e);
+  const duplicates = entries.filter(e => !kept.includes(e)).map(e => ({
+    name: e.source.name,
+    reason: `another export of the same person (using ${best.get(userOf.get(e)).source.name.split('/').pop()})`,
+  }));
+  return { kept, duplicates };
 }
 
 // Unique labels (case-insensitive): later collisions become `name (2)`, `name (3)`, …
