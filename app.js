@@ -260,13 +260,10 @@ function paintProgress() {
   $('pphase').textContent = total ? `${label} · ${nf.format(done)} / ${nf.format(total)}` : `${label}…`;
 }
 
-// What the viewer's poll reads (same shape as the Python server's /api/state).
-const live = { generation: 0, pass: 0, done: false, films: [] };
-window.blendboxdState = async (tab, since) => {
-  const body = { tab: 'blend', generation: live.generation, pass: live.pass, done: live.done };
-  if (since !== live.generation) body.films = live.films;
-  return body;
-};
+// Each pass is pushed straight into the viewer (window.blendboxdPush, defined by
+// startViewer), in the payload shape the Python server's /api/state returns.
+let lastPass = 0;
+const push = state => window.blendboxdPush({ tab: 'blend', generation: lastPass, pass: lastPass, ...state });
 
 function subtitle(names, combiner, minVotes) {
   const tail = `min TMDb votes ${minVotes}`;
@@ -299,13 +296,10 @@ const handlers = {
     if (first) requestAnimationFrame(paintProgress);
   },
   pass: msg => {
-    live.films = msg.records;
-    live.pass = msg.pass;
-    live.done = msg.done;
-    live.generation += 1;
+    lastPass = msg.pass;
     window.blendboxdStats = msg.stats; // for debugging from the console
     showNotes(msg);
-    if (viewing) return; // the viewer picks this up on its next poll
+    if (viewing) { push({ done: msg.done, films: msg.records }); return; }
     viewing = true;
     $('progress').hidden = true;
     $('appbar').hidden = false;
@@ -316,7 +310,7 @@ const handlers = {
       memberActive: msg.names.map(() => true),
       maxShow: msg.topN,
       live: true,
-      pollUrl: 'in-page',
+      pollUrl: '', // no polling: passes are pushed
       combiner: msg.combiner,
       hasCine: false,
       cinemas: [],
@@ -326,13 +320,13 @@ const handlers = {
       subtitleBlend: subtitle(msg.names, msg.combiner, msg.minVoteCount),
       subtitleCine: '',
     });
+    push({ done: msg.done }); // status line for pass 1 (its films are already shown)
   },
   error: msg => {
     if (viewing) {
-      // The results stay usable; deepening just ends. The status line shows the
-      // search as finished, and the note says why it stopped early.
-      live.done = true;
-      live.generation += 1;
+      // The results stay usable; deepening just ends. The status line says it
+      // stopped early, and the note says why.
+      push({ done: true, stopped: true });
       if (msg.auth) { apiKey = ''; store.clear(); }
       $('appnote').textContent = msg.auth
         ? 'TMDb rejected the key, so the search stopped early. Use “New blend” to enter a valid key.'
@@ -353,8 +347,7 @@ const handlers = {
 
 function showFailure(message) {
   if (viewing) {
-    live.done = true;
-    live.generation += 1;
+    push({ done: true, stopped: true });
     $('appnote').textContent = `The search stopped early: ${message}`;
     return;
   }

@@ -567,36 +567,37 @@ function updateStatus(s){
   const n = DATA.length;
   if(ACTIVE === 'cine'){ setStatus(`Now showing — ${n} films`, 'done'); return; }
   const pass = s && s.pass ? ` pass ${s.pass} ·` : '';
-  setStatus(DONE.blend ? `Search complete — ${n} films` : `Deepening…${pass} ${n} films`,
+  const stopped = Boolean(s && s.stopped);        // ended early (e.g. an error), not converged
+  setStatus(stopped ? `Search stopped early — ${n} films`
+            : DONE.blend ? `Search complete — ${n} films` : `Deepening…${pass} ${n} films`,
             DONE.blend ? 'done' : 'searching');
 }
 
-// Where live updates come from: the local server's POLL_URL (Python --serve), or an
-// in-page source when the host page provides window.blendboxdState(tab, since) —
-// the browser app runs the engine itself and answers with the same payload shape.
-async function fetchState(tab, since){
-  if(typeof window.blendboxdState === 'function') return window.blendboxdState(tab, since);
-  const sep = POLL_URL.includes('?') ? '&' : '?';
-  const r = await fetch(`${POLL_URL}${sep}tab=${tab}&since=${since}`, {cache:'no-store'});
-  return r.ok ? r.json() : null;
+// Apply one live-state payload {tab, generation, pass, done, films?, stopped?}: from a
+// poll of POLL_URL (Python --serve), or pushed by a host page that runs the engine
+// itself (the browser app calls window.blendboxdPush and passes no POLL_URL).
+function applyState(s){
+  const t = s.tab || ACTIVE;
+  if(typeof s.done === 'boolean') DONE[t] = s.done;
+  if(s.generation !== GEN[t] && Array.isArray(s.films)){
+    GEN[t] = s.generation;
+    DATASETS[t] = s.films;
+    if(t === ACTIVE){ applyUpdate(s.films); prevTop = topSignature(DATA); }
+  } else if(typeof s.generation === 'number'){
+    GEN[t] = s.generation;
+  }
+  if(t === ACTIVE) updateStatus(s);
+  if(allDone() && timer){ clearInterval(timer); timer = null; }
 }
+window.blendboxdPush = applyState;
 
 async function poll(){
   try{
     const tab = ACTIVE;
-    const s = await fetchState(tab, GEN[tab]);
-    if(!s) return;
-    const t = s.tab || tab;
-    if(typeof s.done === 'boolean') DONE[t] = s.done;
-    if(s.generation !== GEN[t] && Array.isArray(s.films)){
-      GEN[t] = s.generation;
-      DATASETS[t] = s.films;
-      if(t === ACTIVE){ applyUpdate(s.films); prevTop = topSignature(DATA); }
-    } else if(typeof s.generation === 'number'){
-      GEN[t] = s.generation;
-    }
-    if(t === ACTIVE) updateStatus(s);
-    if(allDone() && timer){ clearInterval(timer); timer = null; }
+    const sep = POLL_URL.includes('?') ? '&' : '?';
+    const r = await fetch(`${POLL_URL}${sep}tab=${tab}&since=${GEN[tab]}`, {cache:'no-store'});
+    if(!r.ok) return;
+    applyState(await r.json());
   }catch(e){ /* transient: server not ready or shutting down */ }
 }
 
