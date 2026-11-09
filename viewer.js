@@ -18,9 +18,12 @@ const LIVE = boot.live;
 const POLL_URL = boot.pollUrl;
 const COMBINER = boot.combiner;  // blend method; must match score.py's combine()
 const HAS_CINE = boot.hasCine;  // is the cineblend tab present?
-// Cinemas behind the cineblend pool: [{id,name,logo}, …].
+// Cinemas behind the cineblend pool: [{id,name,logo,through,window_days,times}, …].
 // Each cine film carries a `cinemas` list of the venue id(s) showing it; the
-// cinema filter (cine tab only) and the per-card logos read these.
+// cinema filter (cine tab only) and the per-card logos read these. `through` is the
+// last date the cinema's data covers, `window_days` its fixed fetch window (null:
+// whatever it has published) and `times` false when it gives dates without times.
+// Each cine film's `showings` is {cinema id: {date: [times]}} (Dutch local time).
 const CINEMAS = boot.cinemas;
 const CINEMA_BY_ID = Object.fromEntries(CINEMAS.map(c => [c.id, c]));
 // Cinemas that failed to load (unreachable/blocked/none-matched) — surfaced on the
@@ -56,14 +59,32 @@ const VIBE_PRESETS = {
   slow:      {len: 0.3, cx: 0.8, en:-0.6},  // 🌙 favor slow arthouse, length-tolerant, calm
   challenge: {len: 0.7, cx: 0.9, en: 0.0},  // ⚡ up for long + demanding
 };
+// Dates are 'YYYY-MM-DD' strings throughout (the browser's local date for today).
+function isoDay(t){
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+}
+const TODAY = isoDay(new Date());
+function fmtDay(iso){                       // '2026-11-05' -> 'Thu 5 Nov'
+  const [y,m,d] = String(iso).split('-').map(Number);
+  return new Date(y, m-1, d).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
+}
 let maxCombined = 0.0001;
 let MOOD_ON = false;    // set per-render: true when the vibe re-ranks the combined sort
 let FRESH = new Set();  // tmdb_urls new since the last live update; briefly highlighted
 const state = { q:'', sort:'combined', dir:-1, rmin:null, rmax:null, minr:null,
                 ymin:null, ymax:null, watched:'hide',
+                // Format (backlog #16): each is 'yes' | 'no' | 'only' (see formatAllowed).
+                formats:{live:'yes', cartoon:'yes', anime:'yes'},
                 gmode:'or', genres:new Set(), countries:new Set(), decades:new Set(),
+                // Excluded facets (red chips): a film with ANY of these is hidden,
+                // whatever the AND/OR mode (which applies to the included set only).
+                genresEx:new Set(), countriesEx:new Set(), decadesEx:new Set(),
+                // Keyword and director facets (q054): every kind a card's top items show.
+                kmode:'or', keywords:new Set(), directors:new Set(),
+                keywordsEx:new Set(), directorsEx:new Set(),
                 members:new Set(initialMembers()),  // in the blend at load (owner on, friends off)
                 cinemas:new Set(CINEMAS.map(c=>c.id)),  // cineblend: which venues to show (all)
+                date:TODAY,  // cineblend: show films playing on this date; null = any date
                 vibe:{len:0, cx:0, en:0, beta:0.5, preset:null} };
 
 // ---- client-side re-blend: toggling members re-combines the already-embedded
@@ -117,12 +138,43 @@ function driversFor(d){
 }
 
 const el = id => document.getElementById(id);
-const uniq = key => [...new Set(DATA.flatMap(d => d[key] || []))].sort((a,b)=>a.localeCompare(b));
-// Distinct decades present in the pool (e.g. 1950, 1960, …), ascending.
-const decadeValues = () => [...new Set(DATA.filter(d => d.year!=null)
-  .map(d => Math.floor(d.year/10)*10))].sort((a,b)=>a-b);
 
-function chipRow(container, values, setRef, label){
+// The chip facets, one table (q054): the chip rows, passes(), Reset and the Ctrl+K
+// box all read it. `key` is the driver category a card's top-item tag carries
+// (score.TASTE_DRIVER_CATEGORIES: genre / keyword / director) or the facet's own
+// name; `of(d)` reads a film's values; `mode` is how included values combine (OR:
+// any, AND: all); any excluded value hides a film. `all`: a chip per value in the
+// pool; otherwise (thousands of keywords, hundreds of directors) only the chosen
+// values get a chip, and Ctrl+K or a card's tag adds one.
+function facets(){
+  return [
+    {key:'genre', label:'Genre', box:'genres', inc:state.genres, ex:state.genresEx,
+     mode:state.gmode, all:true, of:d => d.genres || []},
+    {key:'keyword', label:'Keyword', box:'keywords', inc:state.keywords, ex:state.keywordsEx,
+     mode:state.kmode, all:false, of:d => d.keywords || []},
+    {key:'director', label:'Director', box:'directors', inc:state.directors, ex:state.directorsEx,
+     mode:'or', all:false, of:d => d.directors || []},
+    {key:'country', label:'Country', box:'countries', inc:state.countries, ex:state.countriesEx,
+     mode:'or', all:true, of:d => d.countries || []},
+    // A film with no year has no decade: an included decade hides it, an excluded one doesn't.
+    {key:'decade', label:'Decade', box:'decades', inc:state.decades, ex:state.decadesEx,
+     mode:'or', all:true, of:d => d.year == null ? [] : [Math.floor(d.year/10)*10],
+     show:v => v + 's', numeric:true},
+  ];
+}
+// One facet's distinct values in the pool, sorted (decades ascending).
+function facetValues(f, data){
+  const vals = [...new Set(data.flatMap(f.of))];
+  return f.numeric ? vals.sort((a,b) => a-b) : vals.sort((a,b) => String(a).localeCompare(String(b)));
+}
+// One click on a facet value: off -> included (blue) -> excluded (red) -> off.
+function cycleValue(incSet, exSet, v){
+  if(incSet.has(v)){ incSet.delete(v); exSet.add(v); }
+  else if(exSet.has(v)) exSet.delete(v);
+  else incSet.add(v);
+}
+
+function chipRow(container, values, incSet, exSet, label, onchange){
   // Do NOT prune selected values that are absent from this pool. The blendboxd and
   // cineblend tabs share these filter Sets, and the cine pool is a much narrower
   // facet universe, so pruning here would silently drop a selection (e.g. a genre
@@ -130,49 +182,118 @@ function chipRow(container, values, setRef, label){
   // An absent value simply renders no chip on this tab; it stays in the Set and
   // keeps filtering, and its chip reappears when the pool contains it again. (Live
   // widening only ever grows the pool, so nothing is legitimately pruned anyway.)
+  // Each click cycles a chip: off -> included (blue) -> excluded (red) -> off. A value
+  // lives in at most one of incSet / exSet.
   const lbl = label || (v => v);
   container.innerHTML = '';
   for(const v of values){
     const c = document.createElement('span');
     c.className = 'chip'; c.textContent = lbl(v);
-    if(setRef.has(v)) c.classList.add('on');
-    c.onclick = () => { setRef.has(v) ? setRef.delete(v) : setRef.add(v);
-      c.classList.toggle('on'); render(); };
+    const paint = () => {
+      c.classList.toggle('on', incSet.has(v)); c.classList.toggle('ex', exSet.has(v));
+      c.title = incSet.has(v) ? `${lbl(v)} included — click to exclude`
+              : exSet.has(v) ? `${lbl(v)} excluded — click to clear`
+              : `Click to include ${lbl(v)}`;
+    };
+    paint();
+    c.onclick = () => { cycleValue(incSet, exSet, v); paint(); if(onchange) onchange(); render(); };
     container.appendChild(c);
   }
+}
+function renderFacets(){
+  for(const f of facets()){
+    const box = el(f.box); if(!box) continue;
+    if(f.all){ chipRow(box, facetValues(f, DATA), f.inc, f.ex, f.show); continue; }
+    // Chosen values only (in this pool or not: they keep filtering); a cleared chip goes.
+    const chosen = [...f.inc, ...f.ex].sort((a,b) => String(a).localeCompare(String(b)));
+    chipRow(box, chosen, f.inc, f.ex, f.show, renderFacets);
+    if(!chosen.length) box.innerHTML = `<span class="chip-hint">None chosen: press Ctrl+K, or click a ${f.key} on a card.</span>`;
+  }
+}
+
+// Format filter (live action / cartoon / anime; models.classify_format). If any
+// format is set to Only, just the Only formats show; otherwise a No hides that
+// format. A record without a format passes unless some format is set to Only.
+function formatAllowed(f){
+  const only = Object.keys(state.formats).filter(k => state.formats[k] === 'only');
+  if(only.length) return only.includes(f);
+  return state.formats[f] !== 'no';
 }
 
 function passes(d){
   // Watched view mode: hide = only recs; only = only seen; dim = show both.
   if(state.watched === 'hide' && isSeen(d)) return false;
   if(state.watched === 'only' && !isSeen(d)) return false;
+  if(!formatAllowed(d.format)) return false;
   if(state.q){
     const hay = (d.title + ' ' + (d.directors||[]).join(' ')).toLowerCase();
     if(!hay.includes(state.q)) return false;
   }
-  if(state.genres.size){
-    const g = d.genres || [];
-    const ok = state.gmode === 'and'
-      ? [...state.genres].every(x => g.includes(x))   // AND: film has every selected genre
-      : g.some(x => state.genres.has(x));              // OR: film has any selected genre
-    if(!ok) return false;
+  // Chip facets (facets()): included values by the facet's mode, AND: the film has
+  // every one, OR: any one; a film with any excluded value is hidden.
+  for(const f of facets()){
+    if(!f.inc.size && !f.ex.size) continue;
+    const vals = f.of(d);
+    if(f.inc.size){
+      const ok = f.mode === 'and' ? [...f.inc].every(x => vals.includes(x)) : vals.some(x => f.inc.has(x));
+      if(!ok) return false;
+    }
+    if(f.ex.size && vals.some(x => f.ex.has(x))) return false;
   }
-  if(state.countries.size && !(d.countries||[]).some(c => state.countries.has(c))) return false;
   // Cinema filter (cineblend only): a film passes if any selected venue shows it.
   // All venues selected (the default) is a no-op, matching the other facet chips.
   if(ACTIVE==='cine' && CINEMAS.length && state.cinemas.size < CINEMAS.length){
     if(!(d.cinemas||[]).some(c => state.cinemas.has(c))) return false;
   }
+  // Date filter (cineblend only): the film plays that date at a selected cinema.
+  // A record without `showings` has no date data, so the filter leaves it alone.
+  if(ACTIVE==='cine' && state.date && d.showings && !cinemasOn(d, state.date).length) return false;
   if(state.minr != null && (d.tmdb_rating||0) < state.minr) return false;
   if(state.rmin != null){ if(d.runtime == null || d.runtime < state.rmin) return false; }
   if(state.rmax != null){ if(d.runtime == null || d.runtime > state.rmax) return false; }
-  // Year/decade filters exclude films with no year (mirrors the runtime filter).
-  if(state.decades.size){
-    if(d.year == null || !state.decades.has(Math.floor(d.year/10)*10)) return false;
-  }
+  // Year filters exclude films with no year (mirrors the runtime filter).
   if(state.ymin != null){ if(d.year == null || d.year < state.ymin) return false; }
   if(state.ymax != null){ if(d.year == null || d.year > state.ymax) return false; }
   return true;
+}
+
+// The selected cinemas (in chip order) at which film d plays on date `day`.
+function cinemasOn(d, day){
+  const sh = d.showings || {};
+  return CINEMAS.filter(c => state.cinemas.has(c.id) && sh[c.id] && sh[c.id][day] !== undefined)
+                .map(c => c.id);
+}
+// Every date (from today on) on which d plays at a selected cinema, sorted.
+function upcomingDays(d){
+  const sh = d.showings || {}, days = new Set();
+  for(const [cid, byDay] of Object.entries(sh)){
+    if(!state.cinemas.has(cid)) continue;
+    for(const day of Object.keys(byDay)) if(day >= TODAY) days.add(day);
+  }
+  return [...days].sort();
+}
+// Card block for the selected date: one row per cinema, its logo, name and times.
+function showtimesBlock(d){
+  const rows = cinemasOn(d, state.date).map(cid => {
+    const c = CINEMA_BY_ID[cid];
+    const times = d.showings[cid][state.date] || [];
+    const when = times.length
+      ? `<span class="st-times">${times.map(esc).join(' &middot; ')}</span>`
+      : (c.times === false
+          ? `<span class="st-na" title="${esc(c.name)} publishes play dates but no start times we can read; its own site has them">playing &middot; no times from ${esc(c.name)}</span>`
+          : '<span class="st-na">time unknown</span>');
+    return `<div class="st-row"><img loading="lazy" src="${esc(c.logo)}" alt="">`
+         + `<span class="st-name">${esc(c.name)}</span>${when}</div>`;
+  }).join('');
+  return rows ? `<div class="showtimes">${rows}</div>` : '';
+}
+// Card line with no date selected: the next few play dates.
+function nextDatesLine(d){
+  const days = upcomingDays(d);
+  if(!days.length) return '';
+  const shown = days.slice(0, 3).map(fmtDay).join(' &middot; ');
+  const more = days.length > 3 ? ` +${days.length - 3} more` : '';
+  return `<div class="nextdates" title="${esc(days.map(fmtDay).join(', '))}">Next: ${shown}${more}</div>`;
 }
 
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c =>
@@ -193,7 +314,10 @@ function card(d){
   // Per-card cinema marks: show which venue(s) play each film whenever the pool
   // has more than one cinema — a film playing at several shows ALL their logos.
   // (Redundant, so hidden, when the pool is a single cinema: every card is from it.)
-  const showLogos = ACTIVE==='cine' && CINEMAS.length > 1;
+  // With a date selected, the showtimes block (which carries the logos) replaces them.
+  const dated = ACTIVE==='cine' && Boolean(state.date) && Boolean(d.showings);
+  const showLogos = ACTIVE==='cine' && CINEMAS.length > 1 && !dated;
+  const when = ACTIVE!=='cine' || !d.showings ? '' : (dated ? showtimesBlock(d) : nextDatesLine(d));
   const cinelogos = (showLogos && (d.cinemas||[]).length)
     ? `<div class="cinelogos">${(d.cinemas||[]).map(id=>{
         const c = CINEMA_BY_ID[id]; if(!c) return '';
@@ -222,10 +346,14 @@ function card(d){
       : `<span class="rankbadge">#${tr}</span>`;
   // Taste drivers (#4a): the shared features that lifted the blend score, for the
   // current member selection (recomputed per subset from dcon — see driversFor).
+  // Each tag is a filter shortcut (q054): a click cycles its facet's chip.
   const drv = driversFor(d);
+  const fk = Object.fromEntries(facets().map(f => [f.key, f]));
+  const tagState = f => !fk[f.cat] ? '' : fk[f.cat].inc.has(f.name) ? ' sel' : fk[f.cat].ex.has(f.name) ? ' ex' : '';
   const drivers = drv.length
     ? `<div class="drivers"><span class="dl">${soloView() ? 'Top' : 'Shared'}</span>${drv.map(f=>
-        `<span class="dtag ${esc(f.cat)}">${esc(f.name)}</span>`).join('')}</div>`
+        `<span class="dtag ${esc(f.cat)}${tagState(f)}" data-cat="${esc(f.cat)}" data-v="${esc(f.name)}"`
+        + ` title="Filter on ${esc(f.name)} (click again to exclude, again to clear)">${esc(f.name)}</span>`).join('')}</div>`
     : '';
   // Mood readout (#4b): S -> S' with delta + each steered axis's signed push.
   let moodx = '';
@@ -250,6 +378,7 @@ function card(d){
       ${drivers}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
       <div class="cardfoot">
+        ${when}
         ${cinelogos}
         <div class="scores">
           ${scoreBars}
@@ -344,7 +473,9 @@ function render(){
   const moodNote = useMood ? ' · vibe re-ranked' : '';
   const memNote = (state.members.size < NAMES.length)
     ? ` · blending ${state.members.size}/${NAMES.length} members` : '';
-  el('count').textContent = `${matches} match${matches===1?'':'es'} of ${DATA.length} scored${capped}${memNote}${moodNote}`;
+  const dateNote = (ACTIVE==='cine' && state.date) ? ` · on ${fmtDay(state.date)}` : '';
+  if(ACTIVE==='cine' && CINEMAS.length) renderDateBar();   // reach warning tracks date + cinemas
+  el('count').textContent = `${matches} match${matches===1?'':'es'} of ${DATA.length} scored${dateNote}${capped}${memNote}${moodNote}`;
 }
 
 el('q').oninput = e => { state.q = e.target.value.trim().toLowerCase(); render(); };
@@ -359,18 +490,22 @@ el('minr').oninput = e => { state.minr = e.target.value===''?null:+e.target.valu
 el('reset').onclick = () => {
   state.q=''; state.rmin=state.rmax=state.minr=null; state.ymin=state.ymax=null;
   state.watched='hide';
-  state.gmode='or'; state.genres.clear(); state.countries.clear(); state.decades.clear();
+  state.gmode='or'; state.kmode='or';
+  for(const f of facets()){ f.inc.clear(); f.ex.clear(); }
   el('q').value=''; el('rmin').value=el('rmax').value=el('minr').value='';
   el('ymin').value=el('ymax').value='';
-  document.querySelectorAll('.chip.on').forEach(c=>c.classList.remove('on'));
-  document.querySelectorAll('#gmode .gm').forEach(b=>b.classList.toggle('on', b.dataset.mode==='or'));
+  renderFacets();
+  paintModes();
   document.querySelectorAll('#wmode .sg').forEach(b=>b.classList.toggle('on', b.dataset.w==='hide'));
+  for(const f of Object.keys(state.formats)) state.formats[f] = 'yes';
+  paintFormats();
   state.vibe.len=state.vibe.cx=state.vibe.en=0; state.vibe.beta=0.5;
   setPreset(null); syncVibeSliders(); syncVibeOutputs();
   state.members = new Set(NAMES.map((_,i)=>i));  // all members back in the blend
   syncSel(); recomputeMax(); renderMembers();
   state.cinemas = new Set(CINEMAS.map(c=>c.id));  // all venues back on (cineblend)
   renderCinemas();
+  state.date = TODAY;
   render();
 };
 // Members: toggle who is in the blend. At least one must stay selected. Deselecting
@@ -415,11 +550,15 @@ function renderCinemas(){
     box.appendChild(chip);
   });
 }
-// Genre match mode: OR (any selected) | AND (all selected).
-document.querySelectorAll('#gmode .gm').forEach(b => b.onclick = () => {
-  state.gmode = b.dataset.mode;
-  document.querySelectorAll('#gmode .gm').forEach(x => x.classList.toggle('on', x.dataset.mode===state.gmode));
-  render();
+// Genre and keyword match modes: OR (any selected) | AND (all selected). The toggle's
+// id is its state key.
+const MODE_KEYS = ['gmode', 'kmode'];
+function paintModes(){
+  for(const key of MODE_KEYS)
+    document.querySelectorAll(`#${key} .gm`).forEach(x => x.classList.toggle('on', x.dataset.mode===state[key]));
+}
+for(const key of MODE_KEYS) document.querySelectorAll(`#${key} .gm`).forEach(b => b.onclick = () => {
+  state[key] = b.dataset.mode; paintModes(); render();
 });
 // Watched view mode: Hide (recs only) | Dim (show seen, dimmed) | Only (seen only).
 document.querySelectorAll('#wmode .sg').forEach(b => b.onclick = () => {
@@ -427,6 +566,29 @@ document.querySelectorAll('#wmode .sg').forEach(b => b.onclick = () => {
   document.querySelectorAll('#wmode .sg').forEach(x => x.classList.toggle('on', x.dataset.w===state.watched));
   render();
 });
+// Format: Yes | No | Only per format (Live action, Cartoon, Anime); see formatAllowed.
+// The buttons show what is on screen: Only on one format turns every other Yes
+// into No, and Yes beside an Only turns the Onlys back into Yes (same formats
+// stay shown, plus this one).
+function setFormat(f, v){
+  const F = state.formats;
+  F[f] = v;
+  for(const k of Object.keys(F)){
+    if(k === f) continue;
+    if(v === 'only' && F[k] === 'yes') F[k] = 'no';
+    if(v === 'yes' && F[k] === 'only') F[k] = 'yes';
+  }
+}
+function paintFormats(){
+  document.querySelectorAll('#fmts .seg').forEach(seg =>
+    seg.querySelectorAll('.sg').forEach(x =>
+      x.classList.toggle('on', x.dataset.v === state.formats[seg.dataset.f])));
+}
+document.querySelectorAll('#fmts .seg').forEach(seg =>
+  seg.querySelectorAll('.sg').forEach(b => b.onclick = () => {
+    setFormat(seg.dataset.f, b.dataset.v);
+    paintFormats(); render();
+  }));
 
 // ---------------------------------------------------------------- Vibe panel
 function syncVibeOutputs(){
@@ -467,6 +629,51 @@ document.querySelectorAll('#presets .preset').forEach(b => b.onclick = () => {
 });
 syncVibeOutputs();
 
+// Cineblend date selector. The reach line says how far each cinema's data goes:
+// its full programme (full_through, when the programme is big enough to tell) and
+// the last date with any screening listed (through). The warning names the
+// selected cinemas whose data doesn't reach, or only partly covers, the date.
+function reachText(c){
+  const full = c.full_through, some = c.through && (!full || c.through > full);
+  const parts = [];
+  if(full) parts.push(`full programme to ${fmtDay(full)}`);
+  if(some) parts.push(full ? `some screenings to ${fmtDay(c.through)}`
+    : (c.window_days != null ? `next ${c.window_days} days` : `as published, to ${fmtDay(c.through)}`));
+  if(!parts.length) parts.push('no dates');
+  return `${c.name}: ${parts.join(', ')}`;
+}
+function renderDateBar(){
+  if(!el('datebar')) return;
+  el('cdate').value = state.date || '';
+  el('ctoday').classList.toggle('on', state.date === TODAY);
+  el('cany').classList.toggle('on', !state.date);
+  el('reach').textContent = 'Data reaches: ' + CINEMAS.map(c =>
+    reachText(c) + (c.times === false ? ' (dates only, no times)' : '')).join(' · ');
+  const warn = el('reachwarn');
+  let msg = '';
+  if(state.date && state.date < TODAY){
+    msg = `<b>&#9888;</b> ${esc(fmtDay(state.date))} has passed; the data starts today.`;
+  } else if(state.date){
+    const sel = CINEMAS.filter(c => state.cinemas.has(c.id));
+    const day = esc(fmtDay(state.date));
+    const unknown = sel.filter(c => !c.through || c.through < state.date);
+    const partial = sel.filter(c => c.through && c.through >= state.date
+                                    && c.full_through && c.full_through < state.date);
+    const lines = [];
+    if(unknown.length) lines.push(`Not known yet for ${day}: `
+      + unknown.map(c => esc(reachText(c))).join('; ') + '. Their films on this date are missing, not off.');
+    if(partial.length) lines.push(`Only part of the programme for ${day} is published so far at `
+      + partial.map(c => `${esc(c.name)} (full programme to ${esc(fmtDay(c.full_through))})`).join(', ')
+      + '; more films will likely be added.');
+    if(lines.length) msg = '<b>&#9888;</b> ' + lines.join(' ');
+  }
+  warn.innerHTML = msg; warn.hidden = !msg;
+}
+if(el('cdate')){
+  el('cdate').onchange = e => { state.date = e.target.value || null; render(); };
+  el('ctoday').onclick = () => { state.date = TODAY; render(); };
+  el('cany').onclick = () => { state.date = null; render(); };
+}
 function updateDirBtn(){ el('dir').textContent = state.dir<0 ? '▼ desc' : '▲ asc'; }
 
 // Inject one sort option per profile (after "Combined score"). Skipped when solo
@@ -478,13 +685,115 @@ if(!SOLO) NAMES.forEach((n, i) => {
   sortSel.insertBefore(o, sortSel.children[1 + i]);
 });
 
+// ------------------------------------------------ Ctrl+K: find a filter (q054)
+// The box searches every chip facet's values in the pool (facets()); Enter includes
+// the highlighted match, Shift+Enter excludes it, and the box stays open for the next.
+const FIND_LIMIT = 12;
+const FIND = {open:false, opts:[], hits:[], sel:0};
+// Every chip facet's values in `data`, each with its kind and the films that have it.
+function filterOptions(data){
+  const out = [];
+  for(const f of facets()){
+    const n = new Map();
+    for(const d of data) for(const v of new Set(f.of(d))) n.set(v, (n.get(v) || 0) + 1);
+    for(const [v, c] of n) out.push({facet:f.key, kind:f.label, value:v, label:f.show ? f.show(v) : String(v), count:c});
+  }
+  return out;
+}
+// Case- and accent-folded text for matching ("Amélie" finds "amelie").
+function fold(s){
+  return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+// How well option text `label` matches folded query `q`: 0 exact, 1 prefix, 2 a word's
+// prefix, 3 substring, 4 every query word found; -1 no match.
+function matchRank(label, q){
+  const t = fold(label);
+  if(t === q) return 0;
+  if(t.startsWith(q)) return 1;
+  let i = t.indexOf(q);
+  const found = i !== -1;
+  for(; i !== -1; i = t.indexOf(q, i + 1)) if(!/[\p{L}\p{N}]/u.test(t[i-1])) return 2;
+  if(found) return 3;
+  const words = q.split(/\s+/).filter(Boolean);
+  return words.length > 1 && words.every(w => t.includes(w)) ? 4 : -1;
+}
+// The best `limit` options for `query`: by match rank, then most films, then name.
+function findOptions(query, options, limit){
+  const q = fold(query);
+  if(!q) return [];
+  const hits = [];
+  for(const o of options){ const r = matchRank(o.label, q); if(r >= 0) hits.push({...o, rank:r}); }
+  hits.sort((a,b) => a.rank - b.rank || b.count - a.count || a.label.localeCompare(b.label));
+  return hits.slice(0, limit);
+}
+// Include one option's value in its facet (exclude: exclude it). Idempotent.
+function applyOption(o, exclude){
+  const f = facets().find(x => x.key === o.facet);
+  if(!f) return;
+  (exclude ? f.inc : f.ex).delete(o.value);
+  (exclude ? f.ex : f.inc).add(o.value);
+}
+function paintFind(){
+  const q = el('fpq').value;
+  FIND.hits = findOptions(q, FIND.opts, FIND_LIMIT);
+  FIND.sel = Math.max(0, Math.min(FIND.sel, FIND.hits.length - 1));
+  const fk = Object.fromEntries(facets().map(f => [f.key, f]));
+  const st = o => fk[o.facet].inc.has(o.value) ? ' on' : fk[o.facet].ex.has(o.value) ? ' ex' : '';
+  el('fpres').innerHTML = FIND.hits.length
+    ? FIND.hits.map((o,i) => `<div class="fp-row${i===FIND.sel ? ' sel' : ''}${st(o)}" data-i="${i}">`
+        + `<span class="fp-kind">${esc(o.kind)}</span><span class="fp-name">${esc(o.label)}</span>`
+        + `<span class="fp-n" title="films in this pool">${o.count}</span></div>`).join('')
+    : `<div class="fp-empty">${q.trim() ? 'No filter matches.' : 'Type a genre, keyword, director, country or decade.'}</div>`;
+  const chosen = facets().flatMap(f => [...f.inc].map(v => f.show ? f.show(v) : v)
+    .concat([...f.ex].map(v => 'not ' + (f.show ? f.show(v) : v))));
+  el('fpchosen').textContent = chosen.length ? 'Chosen: ' + chosen.join(', ') : '';
+  const row = el('fpres').querySelector('.fp-row.sel'); if(row) row.scrollIntoView({block:'nearest'});
+}
+function openFind(){
+  FIND.open = true; FIND.opts = filterOptions(DATA); FIND.sel = 0;
+  el('fpal').hidden = false; el('fpq').value = ''; paintFind(); el('fpq').focus();
+}
+function closeFind(){ FIND.open = false; el('fpal').hidden = true; }
+function pickFind(i, exclude){
+  const o = FIND.hits[i]; if(!o) return;
+  applyOption(o, exclude);
+  const fd = document.querySelector('details.filters'); if(fd) fd.open = true;
+  el('fpq').value = ''; FIND.sel = 0;
+  renderFacets(); render(); paintFind();
+}
+document.addEventListener('keydown', e => {
+  if((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')){
+    e.preventDefault(); FIND.open ? closeFind() : openFind(); return;
+  }
+  if(FIND.open && e.key === 'Escape'){ e.preventDefault(); closeFind(); }
+});
+el('fpq').addEventListener('keydown', e => {
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    e.preventDefault();
+    const n = FIND.hits.length; if(!n) return;
+    FIND.sel = (FIND.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; paintFind();
+  } else if(e.key === 'Enter'){ e.preventDefault(); pickFind(FIND.sel, e.shiftKey); }
+});
+el('fpq').oninput = () => { FIND.sel = 0; paintFind(); };
+el('fpres').onmousedown = e => {
+  const r = e.target.closest('.fp-row'); if(!r) return;
+  e.preventDefault(); pickFind(+r.dataset.i, e.shiftKey); el('fpq').focus();
+};
+el('fpal').onmousedown = e => { if(e.target === el('fpal')) closeFind(); };   // the backdrop
+el('findbtn').onclick = openFind;
+// A card's top-item tag (genre / keyword / director) cycles that value's filter chip.
+el('grid').addEventListener('click', e => {
+  const t = e.target.closest('.dtag[data-cat]'); if(!t) return;
+  const f = facets().find(x => x.key === t.dataset.cat); if(!f) return;
+  cycleValue(f.inc, f.ex, t.dataset.v);
+  renderFacets(); render();
+});
+
 // Members bar: only shown when there's more than one member to toggle.
 if(NAMES.length > 1){ el('memberbar').hidden = false; syncSel(); renderMembers(); }
 // Cinema chips are built once (fixed venue set); the bar shows only on cineblend.
 if(CINEMAS.length){ renderCinemas(); }
-chipRow(el('genres'), uniq('genres'), state.genres);
-chipRow(el('countries'), uniq('countries'), state.countries);
-chipRow(el('decades'), decadeValues(), state.decades, v => v + 's');
+renderFacets();
 updateDirBtn();
 render();
 
@@ -498,6 +807,7 @@ function applyTabChrome(){
   document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab===ACTIVE));
   // The cinema filter + load-failure notice only make sense on cineblend.
   const cb = el('cinemabar'); if(cb) cb.hidden = !(ACTIVE==='cine' && CINEMAS.length>0);
+  const db = el('datebar'); if(db) db.hidden = !(ACTIVE==='cine' && CINEMAS.length>0);
   renderCineNotice();
 }
 // Surface any cinema that failed to load (cineblend tab only). Elegant failure:
@@ -513,9 +823,8 @@ function renderCineNotice(){
 }
 function rebuildFacets(){
   recomputeMax();
-  chipRow(el('genres'), uniq('genres'), state.genres);
-  chipRow(el('countries'), uniq('countries'), state.countries);
-  chipRow(el('decades'), decadeValues(), state.decades, v => v + 's');
+  renderFacets();
+  if(FIND.open){ FIND.opts = filterOptions(DATA); paintFind(); }   // the pool changed
 }
 function switchTab(tab){
   if(tab === ACTIVE || !DATASETS[tab]) return;

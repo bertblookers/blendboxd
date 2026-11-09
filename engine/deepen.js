@@ -1,7 +1,7 @@
 // Live deepening + viewer records. Port of the widening passes in
 // blendboxd/server.py and build_html_records() in blendboxd/output.py.
 import { pyRound } from './pymath.js';
-import { moodAxes, posterUrl, tmdbUrl } from './models.js';
+import { formatOf, moodAxes, posterUrl, tmdbUrl } from './models.js';
 import { run } from './pipeline.js';
 
 export const MAX_PASSES = 30;
@@ -33,6 +33,8 @@ function record(rank, s, names) {
     countries: [...m.countries],
     runtime: m.runtime,
     genres: [...m.genres],
+    keywords: [...m.keywords],
+    format: formatOf(m),
     scores: names.map(n => pyRound(s.scores.get(n) || 0.0, 4)),
     combined: pyRound(s.combined, 4),
     tmdb_rating: pyRound(m.voteAverage, 1),

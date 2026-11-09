@@ -90,6 +90,7 @@
 
 <div class="toolbar">
   <input id="q" type="search" placeholder="Search title / director…" autocomplete="off">
+  <button type="button" class="linkish" id="findbtn" title="Find any genre, keyword, director, country or decade to filter on (Ctrl+K)">Find a filter (Ctrl+K)</button>
   <label>Sort
     <select id="sort">
       <option value="combined">Combined score</option>
@@ -128,6 +129,14 @@
   <span class="mb-label" title="Show films playing at these cinemas — each film is tagged with where it's on">Cinemas</span>
   <div class="chips" id="cinemas"></div>
 </div>
+<div class="datebar" id="datebar" hidden>
+  <span class="mb-label" title="Show the films playing on this date, with their times per cinema">Date</span>
+  <input type="date" id="cdate" aria-label="Show films playing on this date">
+  <button type="button" class="linkish" id="ctoday">Today</button>
+  <button type="button" class="linkish" id="cany" title="Show every film, whatever the date">Any date</button>
+  <span class="reach" id="reach"></span>
+  <span class="reachwarn" id="reachwarn" hidden></span>
+</div>
 <div class="cinenotice" id="cinenotice" hidden></div>
 
 <details class="vibe" open>
@@ -163,18 +172,41 @@
 </details>
 
 <details class="filters" open>
-  <summary>Filter by genre, country &amp; decade</summary>
+  <summary>Filter by format, genre, keyword, director, country &amp; decade</summary>
+  <div class="chip-group-label">Format</div>
+  <div class="fmts" id="fmts" title="Yes: show · No: hide · Only: show just the formats set to Only">
+    <label>Live action <span class="seg" data-f="live"><button type="button" class="sg on" data-v="yes">Yes</button><button type="button" class="sg" data-v="no">No</button><button type="button" class="sg" data-v="only">Only</button></span></label>
+    <label>Cartoon <span class="seg" data-f="cartoon"><button type="button" class="sg on" data-v="yes">Yes</button><button type="button" class="sg" data-v="no">No</button><button type="button" class="sg" data-v="only">Only</button></span></label>
+    <label>Anime <span class="seg" data-f="anime"><button type="button" class="sg on" data-v="yes">Yes</button><button type="button" class="sg" data-v="no">No</button><button type="button" class="sg" data-v="only">Only</button></span></label>
+  </div>
+  <div class="chip-hint">Click a chip to include it (blue), again to exclude it (red), again to clear.</div>
   <div class="chip-group-label">Genres
-    <span class="gmode" id="gmode" title="OR: any selected genre · AND: all selected genres">
+    <span class="gmode" id="gmode" title="OR: any blue genre · AND: all blue genres · red genres are always excluded">
       <button type="button" class="gm on" data-mode="or">OR</button><button type="button" class="gm" data-mode="and">AND</button>
     </span>
   </div>
   <div class="chips" id="genres"></div>
+  <div class="chip-group-label">Keywords
+    <span class="gmode" id="kmode" title="OR: any blue keyword · AND: all blue keywords · red keywords are always excluded">
+      <button type="button" class="gm on" data-mode="or">OR</button><button type="button" class="gm" data-mode="and">AND</button>
+    </span>
+  </div>
+  <div class="chips" id="keywords"></div>
+  <div class="chip-group-label">Directors</div>
+  <div class="chips" id="directors"></div>
   <div class="chip-group-label">Countries</div>
   <div class="chips" id="countries"></div>
   <div class="chip-group-label">Decades</div>
   <div class="chips" id="decades"></div>
 </details>
+
+<div class="fpal" id="fpal" hidden>
+  <div class="fp-box" role="dialog" aria-label="Find a filter">
+    <input id="fpq" type="text" placeholder="Find a genre, keyword, director, country or decade…" autocomplete="off" spellcheck="false">
+    <div class="fp-res" id="fpres"></div>
+    <div class="fp-foot"><span id="fpchosen"></span><span>&uarr;&darr; move · Enter include · Shift+Enter exclude · Esc close</span></div>
+  </div>
+</div>
 
 <main><div class="grid" id="grid"></div><div class="empty" id="empty" hidden>No films match these filters.</div></main>
 

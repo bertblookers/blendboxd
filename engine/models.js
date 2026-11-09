@@ -60,6 +60,37 @@ export function moodAxes(m) {
   };
 }
 
+// Format (backlog #16): "live" | "cartoon" | "anime". Port of models.classify_format;
+// the rule and its heuristic edges are documented there. In short: no Animation
+// genre = live action; Animation + Japanese language/country or an anime/manga
+// keyword = anime; other Animation = cartoon.
+export const ANIMATION_GENRE_ID = 16;
+const ANIMATION_GENRE = 'Animation';
+const JAPAN = new Set(['JP', 'Japan']);  // ISO code (raw TMDb, TV origin_country) or stored name
+const ANIME_KEYWORDS = new Set(['anime', 'based on manga', 'based on anime']);
+export const FORMATS = ['live', 'cartoon', 'anime'];
+
+export function classifyFormat(animated, language, countries, keywords) {
+  if (!animated) return 'live';
+  if ((language || '').toLowerCase() === 'ja'
+    || countries.some(c => JAPAN.has(c))
+    || keywords.some(k => ANIME_KEYWORDS.has(String(k).toLowerCase()))) return 'anime';
+  return 'cartoon';
+}
+
+// The format of parsed features (tmdb.js parseMovie's shape).
+export const formatOf = m => classifyFormat(m.genres.includes(ANIMATION_GENRE), m.lang, m.countries, m.keywords);
+
+// The format of a raw TMDb movie *or TV* record (port of models.format_of_tmdb).
+export function formatOfTmdb(raw) {
+  const animated = (raw.genres || []).some(g => g && (g.id === ANIMATION_GENRE_ID || g.name === ANIMATION_GENRE));
+  const countries = (raw.production_countries || []).map(c => (c && (c.iso_3166_1 || c.name)) || '');
+  countries.push(...(raw.origin_country || []));
+  const kwBlock = raw.keywords || {};
+  const keywords = (kwBlock.keywords || kwBlock.results || []).map(k => (k && k.name) || '');
+  return classifyFormat(animated, raw.original_language || '', countries, keywords);
+}
+
 export const decadeOf = m => (m.year == null ? null : Math.floor(m.year / 10) * 10);
 export const tmdbUrl = m => `https://www.themoviedb.org/movie/${m.id}`;
 export const posterUrl = m => (m.poster ? `https://image.tmdb.org/t/p/w342${m.poster}` : '');
